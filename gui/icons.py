@@ -16,6 +16,7 @@ def _load_pil(path: Path, size: int) -> Image.Image:
 
 def load_reaction_icons(size: int = DISPLAY_SIZE) -> dict[str, ctk.CTkImage]:
     mapping = {
+        "none": ICON_DIR / "not.png",
         "like": ICON_DIR / "like.png",
         "dislike": ICON_DIR / "dislike.webp",
         "comment": ICON_DIR / "message.png",

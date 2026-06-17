@@ -7,6 +7,9 @@ from services.media_fingerprint import (
     fingerprint_file,
     resolve_stored_media_path,
 )
+from services.profile_text_analysis import analyze_profile_text, extra_search_tokens
+
+_ANALYSIS_VERSION = 1
 
 
 @dataclass
@@ -26,8 +29,19 @@ def build_search_text(
     bio_text: str | None,
     hobbies: str | None,
     raw_text: str,
+    real_age: int | None = None,
 ) -> str:
-    parts = [name, city, bio_text, hobbies, raw_text, str(age) if age is not None else ""]
+    analysis = analyze_profile_text(age=age, real_age=real_age, raw_text=raw_text)
+    parts = [
+        name,
+        city,
+        bio_text,
+        hobbies,
+        raw_text,
+        str(age) if age is not None else "",
+        str(real_age) if real_age is not None else "",
+        extra_search_tokens(analysis),
+    ]
     return " ".join(part.strip() for part in parts if part and part.strip()).casefold()
 
 
@@ -55,6 +69,28 @@ class ProfileRepository:
             conn.execute(
                 "ALTER TABLE profiles ADD COLUMN mutual_like INTEGER NOT NULL DEFAULT 0"
             )
+        if "word_count" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0")
+        if "min_detected_age" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN min_detected_age INTEGER")
+        if "max_detected_age" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN max_detected_age INTEGER")
+        if "age_values" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN age_values TEXT")
+        if "analysis_version" not in columns:
+            conn.execute(
+                "ALTER TABLE profiles ADD COLUMN analysis_version INTEGER NOT NULL DEFAULT 0"
+            )
+        if "trash_score" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN trash_score REAL")
+        if "trash_label" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN trash_label TEXT")
+        if "trash_tags" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN trash_tags TEXT")
+        if "trash_analysis_version" not in columns:
+            conn.execute(
+                "ALTER TABLE profiles ADD COLUMN trash_analysis_version INTEGER NOT NULL DEFAULT 0"
+            )
 
         media_columns = {
             row["name"]
@@ -62,6 +98,8 @@ class ProfileRepository:
         }
         if "file_unique_id" not in media_columns:
             conn.execute("ALTER TABLE profile_media ADD COLUMN file_unique_id TEXT")
+        if "face_count" not in media_columns:
+            conn.execute("ALTER TABLE profile_media ADD COLUMN face_count INTEGER")
 
         reaction_indexes = conn.execute(
             "PRAGMA index_list(reactions)"
@@ -81,7 +119,7 @@ class ProfileRepository:
 
         rows = conn.execute(
             """
-            SELECT id, name, age, city, bio_text, hobbies, raw_text, search_text
+            SELECT id, name, age, real_age, city, bio_text, hobbies, raw_text, search_text
             FROM profiles
             """
         ).fetchall()
@@ -93,21 +131,42 @@ class ProfileRepository:
                 raw_text=row["raw_text"],
                 media_fingerprints=media_fingerprints,
             )
-            search_text = row["search_text"] or build_search_text(
+            analysis = analyze_profile_text(
+                age=row["age"],
+                real_age=row["real_age"],
+                raw_text=row["raw_text"],
+            )
+            search_text = build_search_text(
                 name=row["name"],
                 age=row["age"],
                 city=row["city"],
                 bio_text=row["bio_text"],
                 hobbies=row["hobbies"],
                 raw_text=row["raw_text"],
+                real_age=row["real_age"],
             )
             conn.execute(
                 """
                 UPDATE profiles
-                SET content_hash = ?, search_text = ?
+                SET content_hash = ?,
+                    search_text = ?,
+                    word_count = ?,
+                    min_detected_age = ?,
+                    max_detected_age = ?,
+                    age_values = ?,
+                    analysis_version = ?
                 WHERE id = ?
                 """,
-                (content_hash, search_text, row["id"]),
+                (
+                    content_hash,
+                    search_text,
+                    analysis.word_count,
+                    analysis.min_detected_age,
+                    analysis.max_detected_age,
+                    analysis.age_values,
+                    _ANALYSIS_VERSION,
+                    row["id"],
+                ),
             )
 
         conn.execute(
@@ -232,15 +291,21 @@ class ProfileRepository:
         raw_text: str,
         content_hash: str,
         search_text: str,
+        word_count: int = 0,
+        min_detected_age: int | None = None,
+        max_detected_age: int | None = None,
+        age_values: str | None = None,
     ) -> int:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO profiles (
                     message_id, chat_id, name, age, real_age,
-                    city, bio_text, hobbies, raw_text, content_hash, search_text
+                    city, bio_text, hobbies, raw_text, content_hash, search_text,
+                    word_count, min_detected_age, max_detected_age, age_values,
+                    analysis_version
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message_id,
@@ -254,6 +319,11 @@ class ProfileRepository:
                     raw_text,
                     content_hash,
                     search_text,
+                    word_count,
+                    min_detected_age,
+                    max_detected_age,
+                    age_values,
+                    _ANALYSIS_VERSION,
                 ),
             )
             return int(cursor.lastrowid)
@@ -288,6 +358,63 @@ class ProfileRepository:
                     sort_order,
                 ),
             )
+
+    def update_profile_trash(
+        self,
+        profile_id: int,
+        *,
+        trash_score: float,
+        trash_label: str,
+        trash_tags: str,
+        trash_analysis_version: int,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE profiles
+                SET trash_score = ?,
+                    trash_label = ?,
+                    trash_tags = ?,
+                    trash_analysis_version = ?
+                WHERE id = ?
+                """,
+                (
+                    trash_score,
+                    trash_label,
+                    trash_tags,
+                    trash_analysis_version,
+                    profile_id,
+                ),
+            )
+
+    def set_media_face_count(
+        self,
+        profile_id: int,
+        sort_order: int,
+        face_count: int,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE profile_media
+                SET face_count = ?
+                WHERE profile_id = ? AND sort_order = ?
+                """,
+                (face_count, profile_id, sort_order),
+            )
+
+    def get_profile_media_rows(self, profile_id: int) -> list[tuple[str, str | None, int]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT media_type, local_path, sort_order
+                FROM profile_media
+                WHERE profile_id = ?
+                ORDER BY sort_order, id
+                """,
+                (profile_id,),
+            ).fetchall()
+        return [(row["media_type"], row["local_path"], int(row["sort_order"])) for row in rows]
 
     def get_profile_id_by_message(self, chat_id: int, message_id: int) -> int | None:
         with self._connect() as conn:

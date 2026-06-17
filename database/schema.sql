@@ -11,6 +11,14 @@ CREATE TABLE IF NOT EXISTS profiles (
     raw_text TEXT NOT NULL,
     content_hash TEXT,
     search_text TEXT,
+    word_count INTEGER NOT NULL DEFAULT 0,
+    min_detected_age INTEGER,
+    max_detected_age INTEGER,
+    age_values TEXT,
+    trash_score REAL,
+    trash_label TEXT,
+    trash_tags TEXT,
+    trash_analysis_version INTEGER NOT NULL DEFAULT 0,
     mutual_like INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (chat_id, message_id)
@@ -24,6 +32,7 @@ CREATE TABLE IF NOT EXISTS profile_media (
     file_id TEXT,
     file_unique_id TEXT,
     local_path TEXT,
+    face_count INTEGER,
     sort_order INTEGER NOT NULL DEFAULT 0
 );
 

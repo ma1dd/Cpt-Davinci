@@ -9,6 +9,11 @@ from services.leomatch_parser import (
     extract_bio_text,
     parse_header_line,
 )
+from services.profile_text_analysis import analyze_profile_text, extra_search_tokens
+from services.trash_analyzer import TRASH_ANALYSIS_VERSION, TrashAnalysisResult, TrashTag
+
+_ANALYSIS_VERSION = 1
+_BACKFILL_TRASH_BATCH = 15
 
 
 class ReactionFilter(str, Enum):
@@ -45,6 +50,7 @@ class FilterParams:
     city: str = ""
     age_from: int = 18
     age_to: int = 99
+    min_words: int = 0
     reaction: ReactionFilter = ReactionFilter.ALL
     period: PeriodFilter = PeriodFilter.ALL
 
@@ -71,6 +77,8 @@ class ProfileSummary:
     raw_text: str
     created_at: str
     reaction_label: str
+    trash_score: float | None = None
+    trash_label: str | None = None
 
 
 @dataclass
@@ -80,8 +88,8 @@ class ViewerStats:
     dislikes: int
     comments: int
     mutual_likes: int
-    with_media: int
-    with_reaction: int
+    avg_trash_score: float | None
+    trash_over_90_pct: float | None
 
 
 @dataclass
@@ -96,6 +104,9 @@ class ProfileView:
     raw_text: str
     created_at: str
     mutual_like: bool = False
+    trash_score: float | None = None
+    trash_label: str | None = None
+    trash_tags: list[TrashTag] = field(default_factory=list)
     media: list[MediaInfo] = field(default_factory=list)
     reactions: list[ReactionInfo] = field(default_factory=list)
 
@@ -103,6 +114,7 @@ class ProfileView:
 class ProfileViewerRepository:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self.base_dir = db_path.resolve().parent.parent
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -115,12 +127,33 @@ class ProfileViewerRepository:
         }
         if "search_text" not in columns:
             conn.execute("ALTER TABLE profiles ADD COLUMN search_text TEXT")
+        if "word_count" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN word_count INTEGER NOT NULL DEFAULT 0")
+        if "min_detected_age" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN min_detected_age INTEGER")
+        if "max_detected_age" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN max_detected_age INTEGER")
+        if "age_values" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN age_values TEXT")
+        if "analysis_version" not in columns:
+            conn.execute(
+                "ALTER TABLE profiles ADD COLUMN analysis_version INTEGER NOT NULL DEFAULT 0"
+            )
+
         rows = conn.execute(
-            "SELECT id, name, age, city, bio_text, hobbies, raw_text, search_text FROM profiles"
+            """
+            SELECT id, name, age, real_age, city, bio_text, hobbies, raw_text
+            FROM profiles
+            WHERE COALESCE(analysis_version, 0) < ?
+            """,
+            (_ANALYSIS_VERSION,),
         ).fetchall()
         for row in rows:
-            if row["search_text"]:
-                continue
+            analysis = analyze_profile_text(
+                age=row["age"],
+                real_age=row["real_age"],
+                raw_text=row["raw_text"],
+            )
             search_text = " ".join(
                 part.strip()
                 for part in (
@@ -130,12 +163,31 @@ class ProfileViewerRepository:
                     row["hobbies"],
                     row["raw_text"],
                     str(row["age"]) if row["age"] is not None else "",
+                    str(row["real_age"]) if row["real_age"] is not None else "",
+                    extra_search_tokens(analysis),
                 )
                 if part and str(part).strip()
             ).casefold()
             conn.execute(
-                "UPDATE profiles SET search_text = ? WHERE id = ?",
-                (search_text, row["id"]),
+                """
+                UPDATE profiles
+                SET search_text = ?,
+                    word_count = ?,
+                    min_detected_age = ?,
+                    max_detected_age = ?,
+                    age_values = ?,
+                    analysis_version = ?
+                WHERE id = ?
+                """,
+                (
+                    search_text,
+                    analysis.word_count,
+                    analysis.min_detected_age,
+                    analysis.max_detected_age,
+                    analysis.age_values,
+                    _ANALYSIS_VERSION,
+                    row["id"],
+                ),
             )
 
     def _ensure_profile_columns(self, conn: sqlite3.Connection) -> None:
@@ -147,10 +199,78 @@ class ProfileViewerRepository:
                 "ALTER TABLE profiles ADD COLUMN mutual_like INTEGER NOT NULL DEFAULT 0"
             )
 
+    def _ensure_trash_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(profiles)").fetchall()
+        }
+        if "trash_score" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN trash_score REAL")
+        if "trash_label" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN trash_label TEXT")
+        if "trash_tags" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN trash_tags TEXT")
+        if "trash_analysis_version" not in columns:
+            conn.execute(
+                "ALTER TABLE profiles ADD COLUMN trash_analysis_version INTEGER NOT NULL DEFAULT 0"
+            )
+        media_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(profile_media)").fetchall()
+        }
+        if "face_count" not in media_columns:
+            conn.execute("ALTER TABLE profile_media ADD COLUMN face_count INTEGER")
+
+    def count_pending_trash_analysis(self) -> int:
+        with self._connect() as conn:
+            self._ensure_trash_columns(conn)
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM profiles
+                WHERE COALESCE(trash_analysis_version, 0) < ?
+                """,
+                (TRASH_ANALYSIS_VERSION,),
+            ).fetchone()
+        return int(row["c"])
+
+    def backfill_trash_analysis(self, *, limit: int = _BACKFILL_TRASH_BATCH) -> int:
+        from database.repository import ProfileRepository
+        from services.trash_backfill import run_trash_analysis_for_profile
+
+        with self._connect() as conn:
+            self._ensure_trash_columns(conn)
+            rows = conn.execute(
+                """
+                SELECT id, raw_text, name, age, word_count
+                FROM profiles
+                WHERE COALESCE(trash_analysis_version, 0) < ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (TRASH_ANALYSIS_VERSION, limit),
+            ).fetchall()
+
+        if not rows:
+            return 0
+
+        write_repo = ProfileRepository(self.db_path, self.base_dir)
+        for row in rows:
+            run_trash_analysis_for_profile(
+                write_repo,
+                int(row["id"]),
+                raw_text=row["raw_text"],
+                name=row["name"],
+                age=row["age"],
+                word_count=row["word_count"],
+                base_dir=self.base_dir,
+                compress_photos=False,
+            )
+        return len(rows)
+
     def get_latest_profiles(self, limit: int = 10) -> list[ProfileSummary]:
         with self._connect() as conn:
             self._ensure_search_columns(conn)
             self._ensure_profile_columns(conn)
+            self._ensure_trash_columns(conn)
             rows = conn.execute(
                 """
                 SELECT
@@ -161,6 +281,8 @@ class ProfileViewerRepository:
                     p.raw_text,
                     p.created_at,
                     p.mutual_like,
+                    p.trash_score,
+                    p.trash_label,
                     GROUP_CONCAT(r.reaction_type, ',') AS reaction_types
                 FROM profiles p
                 LEFT JOIN reactions r ON r.profile_id = p.id
@@ -183,6 +305,8 @@ class ProfileViewerRepository:
                     row["reaction_types"],
                     mutual=bool(row["mutual_like"]),
                 ),
+                trash_score=row["trash_score"],
+                trash_label=row["trash_label"],
             )
             for row in rows
         ]
@@ -193,6 +317,7 @@ class ProfileViewerRepository:
     def get_stats(self) -> ViewerStats:
         with self._connect() as conn:
             self._ensure_profile_columns(conn)
+            self._ensure_trash_columns(conn)
             profiles = conn.execute("SELECT COUNT(*) AS c FROM profiles").fetchone()["c"]
             likes = conn.execute(
                 """
@@ -222,26 +347,36 @@ class ProfileViewerRepository:
             mutual_likes = conn.execute(
                 "SELECT COUNT(*) AS c FROM profiles WHERE mutual_like = 1"
             ).fetchone()["c"]
-            with_media = conn.execute(
+            avg_row = conn.execute(
                 """
-                SELECT COUNT(DISTINCT profile_id) AS c
-                FROM profile_media
+                SELECT AVG(trash_score) AS avg_trash
+                FROM profiles
+                WHERE trash_score IS NOT NULL
                 """
-            ).fetchone()["c"]
-            with_reaction = conn.execute(
+            ).fetchone()
+            avg_trash = avg_row["avg_trash"]
+            over90_row = conn.execute(
                 """
-                SELECT COUNT(DISTINCT profile_id) AS c
-                FROM reactions
+                SELECT
+                    SUM(CASE WHEN trash_score > 90 THEN 1 ELSE 0 END) AS over90,
+                    COUNT(*) AS total
+                FROM profiles
+                WHERE trash_score IS NOT NULL
                 """
-            ).fetchone()["c"]
+            ).fetchone()
+            over90 = int(over90_row["over90"] or 0)
+            scored_total = int(over90_row["total"] or 0)
+            trash_over_90_pct = (
+                100.0 * over90 / scored_total if scored_total > 0 else None
+            )
         return ViewerStats(
             profiles=profiles,
             likes=likes,
             dislikes=dislikes,
             comments=comments,
             mutual_likes=mutual_likes,
-            with_media=with_media,
-            with_reaction=with_reaction,
+            avg_trash_score=float(avg_trash) if avg_trash is not None else None,
+            trash_over_90_pct=trash_over_90_pct,
         )
 
     def search_profile_summaries(self, filters: FilterParams) -> list[ProfileSummary]:
@@ -259,6 +394,8 @@ class ProfileViewerRepository:
                 p.raw_text,
                 p.created_at,
                 p.mutual_like,
+                p.trash_score,
+                p.trash_label,
                 GROUP_CONCAT(r.reaction_type, ',') AS reaction_types
             FROM profiles p
             LEFT JOIN reactions r ON r.profile_id = p.id
@@ -283,6 +420,8 @@ class ProfileViewerRepository:
                     row["reaction_types"],
                     mutual=bool(row["mutual_like"]),
                 ),
+                    trash_score=row["trash_score"],
+                    trash_label=row["trash_label"],
                 )
             )
         return summaries
@@ -311,8 +450,21 @@ class ProfileViewerRepository:
             conditions.append("COALESCE(p.search_text, '') LIKE ?")
             params.append(needle)
 
-        conditions.append("(p.age IS NOT NULL AND p.age BETWEEN ? AND ?)")
-        params.extend([filters.age_from, filters.age_to])
+        conditions.append(
+            """
+            (
+                p.min_detected_age IS NOT NULL
+                AND p.max_detected_age IS NOT NULL
+                AND p.min_detected_age <= ?
+                AND p.max_detected_age >= ?
+            )
+            """
+        )
+        params.extend([filters.age_to, filters.age_from])
+
+        if filters.min_words > 0:
+            conditions.append("COALESCE(p.word_count, 0) > ?")
+            params.append(filters.min_words)
 
         if filters.reaction == ReactionFilter.LIKE:
             conditions.append(
@@ -364,16 +516,18 @@ class ProfileViewerRepository:
         with self._connect() as conn:
             self._ensure_search_columns(conn)
             self._ensure_profile_columns(conn)
+            self._ensure_trash_columns(conn)
             rows = conn.execute(query, params).fetchall()
         return [int(row["id"]) for row in rows]
 
     def get_profile(self, profile_id: int) -> ProfileView | None:
         with self._connect() as conn:
             self._ensure_profile_columns(conn)
+            self._ensure_trash_columns(conn)
             profile = conn.execute(
                 """
                 SELECT id, name, age, real_age, city, bio_text, hobbies, raw_text,
-                       created_at, mutual_like
+                       created_at, mutual_like, trash_score, trash_label, trash_tags
                 FROM profiles
                 WHERE id = ?
                 """,
@@ -402,6 +556,11 @@ class ProfileViewerRepository:
                 (profile_id,),
             ).fetchall()
 
+        trash_result = TrashAnalysisResult.from_json(
+            profile["trash_score"],
+            profile["trash_label"],
+            profile["trash_tags"],
+        )
         return ProfileView(
             id=int(profile["id"]),
             name=profile["name"],
@@ -413,6 +572,9 @@ class ProfileViewerRepository:
             raw_text=profile["raw_text"],
             created_at=profile["created_at"],
             mutual_like=bool(profile["mutual_like"]),
+            trash_score=profile["trash_score"],
+            trash_label=profile["trash_label"],
+            trash_tags=trash_result.tags,
             media=[
                 MediaInfo(
                     media_type=row["media_type"],
@@ -439,7 +601,7 @@ def _summarize_reactions(raw: str | None, *, mutual: bool = False) -> str:
         return " ".join(labels) if labels else "—"
     types = {part.strip() for part in raw.split(",") if part.strip()}
     if "like" in types:
-        labels.append("❤")
+        labels.append("❤️")
     if "dislike" in types:
         labels.append("👎")
     if "comment" in types:
@@ -470,34 +632,54 @@ def resolve_media_path(stored_path: str | None, base_dir: Path) -> Path | None:
     return None
 
 
-def format_reaction_status(profile: ProfileView) -> str:
-    if profile.mutual_like:
-        return "Взаимный лайк 💞"
+_EMOJI_ONLY = frozenset({"❤️", "❤", "👎", "💌", "💌 / 📹"})
 
-    if not profile.reactions:
-        return "Нет сохранённой реакции."
 
-    lines: list[str] = []
-    for index, reaction in enumerate(profile.reactions, start=1):
+def collect_reaction_messages(reactions: list[ReactionInfo]) -> list[str]:
+    messages: list[str] = []
+    for reaction in reactions:
         text = (reaction.comment_text or "").strip()
-        if text in {"❤️", "❤", "👎"}:
+        if reaction.reaction_type == "comment":
+            if len(text) >= 3 and text not in _EMOJI_ONLY:
+                messages.append(text)
             continue
-        if text:
-            lines.append(f"{index}. {text}")
-        elif reaction.reaction_type == "like":
-            lines.append(f"{index}. Лайк")
-        elif reaction.reaction_type == "dislike":
-            lines.append(f"{index}. Дизлайк")
+        if text and text not in _EMOJI_ONLY and len(text) >= 3:
+            messages.append(text)
+    return messages
 
-    if lines:
-        return "\n".join(lines)
 
-    primary = profile.reactions[-1]
-    if primary.reaction_type == "like":
-        return "Лайк"
-    if primary.reaction_type == "dislike":
-        return "Дизлайк"
-    return "Реакция сохранена"
+def reaction_kind(profile: ProfileView) -> str | None:
+    """none | like | dislike | mutual | message"""
+    if profile.mutual_like:
+        return "mutual"
+    if not profile.reactions:
+        return None
+
+    messages = collect_reaction_messages(profile.reactions)
+    if messages:
+        return "message"
+
+    last = profile.reactions[-1]
+    if last.reaction_type == "like":
+        return "like"
+    if last.reaction_type == "dislike":
+        return "dislike"
+
+    text = (last.comment_text or "").strip()
+    if text in {"❤️", "❤"}:
+        return "like"
+    if text == "👎":
+        return "dislike"
+    if last.reaction_type == "comment" and len(text) >= 3:
+        return "message"
+    return None
+
+
+def format_reaction_messages(profile: ProfileView) -> str:
+    messages = collect_reaction_messages(profile.reactions)
+    if not messages:
+        return ""
+    return "\n".join(messages)
 
 
 def build_description(profile: ProfileView) -> str:
