@@ -107,6 +107,7 @@ class ProfileView:
     trash_score: float | None = None
     trash_label: str | None = None
     trash_tags: list[TrashTag] = field(default_factory=list)
+    detected_signals: str | None = None
     media: list[MediaInfo] = field(default_factory=list)
     reactions: list[ReactionInfo] = field(default_factory=list)
 
@@ -213,6 +214,8 @@ class ProfileViewerRepository:
             conn.execute(
                 "ALTER TABLE profiles ADD COLUMN trash_analysis_version INTEGER NOT NULL DEFAULT 0"
             )
+        if "detected_signals" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN detected_signals TEXT")
         media_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(profile_media)").fetchall()
@@ -527,7 +530,8 @@ class ProfileViewerRepository:
             profile = conn.execute(
                 """
                 SELECT id, name, age, real_age, city, bio_text, hobbies, raw_text,
-                       created_at, mutual_like, trash_score, trash_label, trash_tags
+                       created_at, mutual_like, trash_score, trash_label, trash_tags,
+                       detected_signals
                 FROM profiles
                 WHERE id = ?
                 """,
@@ -575,6 +579,7 @@ class ProfileViewerRepository:
             trash_score=profile["trash_score"],
             trash_label=profile["trash_label"],
             trash_tags=trash_result.tags,
+            detected_signals=profile["detected_signals"],
             media=[
                 MediaInfo(
                     media_type=row["media_type"],

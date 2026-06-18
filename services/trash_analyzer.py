@@ -10,8 +10,10 @@ import emoji
 
 from services.leomatch_parser import extract_bio_text
 from services.profile_text_analysis import extract_claimed_ages
+from services.signal_catalog import apply_custom_rules
+from services.signal_extractor import ProfileSignals, extract_profile_signals
 
-TRASH_ANALYSIS_VERSION = 7
+TRASH_ANALYSIS_VERSION = 8
 
 SOCIAL_LINK_RE = re.compile(
     r"(?:"
@@ -187,7 +189,6 @@ def count_bio_emojis(raw: str) -> int:
 
 class TrashAnalyzer:
     HEAVY_RULES: tuple[tuple[str, float, str], ...] = (
-        (r"(покатай|покататься|катать|машину|на\s+машин)", 25, "Покатай / машину"),
         (r"(бан|забанен)\b.*(пиши|пешите|первый|первые)", 33, "Бан + «пишите первые»"),
         (r"пишите\s+первые", 33, "Пишите первые"),
         (r"(на\s*один\s*раз|интрижк|без\s*обязательств|fwb|ons|ничего\s+серь[её]зного|секс|чисто\s+потрах)", 40, "Разовое / интрижка / секс"),
@@ -215,8 +216,11 @@ class TrashAnalyzer:
         (r"состою\s+во\s+многих\s+фд", 4, "«Состою во многих фд»"),
     )
 
-    LIGHT_RULES: tuple[tuple[str, float, str], ...] = (
-        (r"\bмимо\b", 10, "«мимо»"),
+    LIGHT_RULES: tuple[tuple[str, float, str], ...] = ()
+
+    POKATAY_EXCLUDE_RE = re.compile(
+        r"переед|переезж|часто\s+катаюсь|живу\s+не\s+в\s+мск|планирую\s+переез",
+        re.IGNORECASE,
     )
 
     def analyze(
@@ -246,6 +250,7 @@ class TrashAnalyzer:
         phone_flags = list(photo_phone_flags or [])
         tags: list[TrashTag] = []
         heavy_flags = 0
+        profile_signals = extract_profile_signals(raw)
 
         def add(delta: float, label: str, *, heavy: bool = False) -> None:
             nonlocal heavy_flags
@@ -333,6 +338,8 @@ class TrashAnalyzer:
                 add(11, "«хз»", heavy=True)
 
             for pattern, weight, label in self.HEAVY_RULES:
+                if label == "Требования к росту" and profile_signals.height_in_parens:
+                    continue
                 if re.search(pattern, clean, re.IGNORECASE):
                     add(weight, label, heavy=True)
 
@@ -348,6 +355,11 @@ class TrashAnalyzer:
             for pattern, weight, label in self.LIGHT_RULES:
                 if re.search(pattern, clean, re.IGNORECASE):
                     add(weight, label, heavy=False)
+
+            apply_custom_rules(raw, add)
+
+            if re.search(r"мне\s+нечего\s+(?:тут\s+)?сказать", clean) and photo_count >= 2:
+                add(30, f"Пустая анкета при {photo_count} фото", heavy=True)
 
             self._apply_fandom_music_heuristics(clean, add)
             self._apply_positive_bonuses(clean, raw, add)

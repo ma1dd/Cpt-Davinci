@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     trash_label TEXT,
     trash_tags TEXT,
     trash_analysis_version INTEGER NOT NULL DEFAULT 0,
+    detected_signals TEXT,
     mutual_like INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (chat_id, message_id)

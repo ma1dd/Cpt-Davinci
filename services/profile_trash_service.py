@@ -59,7 +59,7 @@ def analyze_profile_trash(
     media_rows: list[tuple[str, str | None]],
     base_dir: Path,
     compress_photos: bool = False,
-) -> tuple[TrashAnalysisResult, list[MediaAnalysisItem]]:
+) -> tuple[TrashAnalysisResult, list[MediaAnalysisItem], "ProfileSignals"]:
     media = analyze_media_items(
         media_rows,
         base_dir,
@@ -83,4 +83,7 @@ def analyze_profile_trash(
         profile_age=age,
         word_count=word_count,
     )
-    return result, media
+    from services.signal_extractor import extract_profile_signals
+
+    signals = extract_profile_signals(raw_text)
+    return result, media, signals

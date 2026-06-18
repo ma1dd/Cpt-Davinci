@@ -21,6 +21,7 @@ from database.viewer_queries import (
     reaction_kind,
 )
 from services.trash_analyzer import format_trash_percent
+from services.signal_extractor import format_profile_signals
 from gui.emoji_text import (
     TEXT_FONT_DESCRIPTION,
     TEXT_FONT_REACTION,
@@ -36,7 +37,10 @@ from gui.emoji_text import (
 from gui.incremental_list import IncrementalProfileList
 from gui.profile_row import populate_profile_rows
 from gui.reaction_picker import ReactionPicker
+from gui.rules_page import RulesPage
+from gui.sidebar_nav import SidebarNav
 from gui.trash_gauge import TrashOver90Gauge
+from gui.user_profile_page import UserProfilePage
 from gui.media import (
     MEDIA_SIZE,
     collect_resolved_media,
@@ -46,7 +50,8 @@ from gui.media import (
 )
 from viewer_config import ViewerSettings, load_viewer_settings
 
-SIDEBAR_WIDTH = 310
+NAV_WIDTH = 200
+FILTERS_WIDTH = 280
 AGE_MIN = 18
 AGE_MAX = 99
 PROFILE_CACHE_SIZE = 80
@@ -80,8 +85,8 @@ class ProfileViewerApp(ctk.CTk):
         self.repo = ProfileViewerRepository(settings.db_path)
 
         self.title("LeoMatch — просмотр анкет")
-        self.geometry("1220x780")
-        self.minsize(1020, 680)
+        self.geometry("1320x780")
+        self.minsize(1100, 680)
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
 
@@ -110,23 +115,38 @@ class ProfileViewerApp(ctk.CTk):
         self._show_home(record_history=False)
 
     def _build_layout(self) -> None:
-        self.grid_columnconfigure(0, weight=0, minsize=SIDEBAR_WIDTH)
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=0, minsize=NAV_WIDTH)
+        self.grid_columnconfigure(1, weight=0, minsize=FILTERS_WIDTH)
+        self.grid_columnconfigure(2, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        self._build_sidebar()
+        self._build_nav_panel()
+        self._build_filters_panel()
         self._build_content_area()
 
-    def _build_sidebar(self) -> None:
-        self.sidebar = ctk.CTkFrame(self, width=SIDEBAR_WIDTH, corner_radius=12)
-        self.sidebar.grid(row=0, column=0, sticky="ns", padx=(16, 8), pady=16)
-        self.sidebar.grid_propagate(False)
-        self.sidebar.grid_columnconfigure(0, weight=1)
-        self.sidebar.grid_rowconfigure(0, weight=1)
-        self.sidebar.grid_rowconfigure(1, weight=0)
+    def _build_nav_panel(self) -> None:
+        self.nav_panel = ctk.CTkFrame(self, width=NAV_WIDTH, corner_radius=12)
+        self.nav_panel.grid(row=0, column=0, sticky="ns", padx=(16, 4), pady=16)
+        self.nav_panel.grid_propagate(False)
+        self.nav_panel.grid_columnconfigure(0, weight=1)
+        self.nav_panel.grid_rowconfigure(0, weight=1)
 
-        scroll = ctk.CTkScrollableFrame(self.sidebar, label_text="Фильтры", height=520)
-        scroll.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 4))
+        self.sidebar_nav = SidebarNav(
+            self.nav_panel,
+            on_select=self._on_nav_select,
+        )
+        self.sidebar_nav.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+    def _build_filters_panel(self) -> None:
+        self.filters_panel = ctk.CTkFrame(self, width=FILTERS_WIDTH, corner_radius=12)
+        self.filters_panel.grid(row=0, column=1, sticky="ns", padx=(4, 4), pady=16)
+        self.filters_panel.grid_propagate(False)
+        self.filters_panel.grid_columnconfigure(0, weight=1)
+        self.filters_panel.grid_rowconfigure(0, weight=1)
+        self.filters_panel.grid_rowconfigure(1, weight=0)
+
+        scroll = ctk.CTkScrollableFrame(self.filters_panel, label_text="Фильтры")
+        scroll.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 4))
         scroll.grid_columnconfigure(0, weight=1)
         self.filters_scroll = scroll
 
@@ -166,37 +186,37 @@ class ProfileViewerApp(ctk.CTk):
             "Период",
             list(PERIOD_OPTIONS.keys()),
         )
-        filter_row += 1
 
         self.keyword_entry.bind("<Return>", lambda _event: self._apply_filters())
 
-        bottom = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        bottom = ctk.CTkFrame(self.filters_panel, fg_color="transparent")
         bottom.grid(row=1, column=0, sticky="ew", padx=12, pady=(4, 12))
+        self.filters_bottom = bottom
         bottom.grid_columnconfigure(0, weight=1)
 
         self.apply_button = ctk.CTkButton(
             bottom,
-            text="Применить фильтры",
-            height=42,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            text="Применить",
+            height=38,
+            font=ctk.CTkFont(size=14, weight="bold"),
             command=self._apply_filters,
         )
-        self.apply_button.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.apply_button.grid(row=0, column=0, sticky="ew", pady=(0, 4))
 
         self.reset_button = ctk.CTkButton(
             bottom,
-            text="Сбросить фильтры",
-            height=36,
+            text="Сбросить",
+            height=32,
             fg_color=("gray75", "gray25"),
             hover_color=("gray65", "gray35"),
             command=self._reset_filters,
         )
-        self.reset_button.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        self.reset_button.grid(row=1, column=0, sticky="ew", pady=(0, 4))
 
         self.home_sidebar_button = ctk.CTkButton(
             bottom,
-            text="На главный экран",
-            height=36,
+            text="На главную",
+            height=32,
             fg_color=("gray75", "gray25"),
             hover_color=("gray65", "gray35"),
             command=lambda: self._show_home(record_history=True),
@@ -205,7 +225,7 @@ class ProfileViewerApp(ctk.CTk):
 
     def _build_content_area(self) -> None:
         self.content = ctk.CTkFrame(self, corner_radius=12)
-        self.content.grid(row=0, column=1, sticky="nsew", padx=(8, 16), pady=16)
+        self.content.grid(row=0, column=2, sticky="nsew", padx=(4, 16), pady=16)
         self.content.grid_columnconfigure(0, weight=1)
         self.content.grid_rowconfigure(1, weight=1)
         self.content.grid_rowconfigure(2, weight=0)
@@ -299,6 +319,29 @@ class ProfileViewerApp(ctk.CTk):
         self._build_home_page()
         self._build_list_page()
         self._build_detail_page()
+
+        self.rules_frame = RulesPage(self.body)
+        self.rules_frame.grid_columnconfigure(0, weight=1)
+        self.rules_frame.grid_rowconfigure(0, weight=1)
+
+        self.user_profile_frame = UserProfilePage(
+            self.body,
+            base_dir=self.settings.base_dir,
+        )
+        self.user_profile_frame.grid_columnconfigure(0, weight=1)
+        self.user_profile_frame.grid_rowconfigure(0, weight=1)
+
+        self.corpus_frame = ctk.CTkFrame(self.body, fg_color="transparent")
+        self.corpus_frame.grid_columnconfigure(0, weight=1)
+        self.corpus_frame.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            self.corpus_frame,
+            text="Корпус размеченных анкет",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.corpus_box = ctk.CTkTextbox(self.corpus_frame, font=plain_ui_font(13))
+        self.corpus_box.grid(row=1, column=0, sticky="nsew")
 
     def _build_home_page(self) -> None:
         wrap = ctk.CTkFrame(self.home_frame, fg_color="transparent")
@@ -534,6 +577,18 @@ class ProfileViewerApp(ctk.CTk):
             height=96,
         )
         self.trash_plus_box.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+
+        self.signals_box = ctk.CTkTextbox(
+            self.trash_block,
+            wrap="word",
+            font=plain_ui_font(12),
+            height=52,
+            text_color=("gray25", "gray75"),
+        )
+        self.signals_box.grid(
+            row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10),
+        )
+        self.signals_box.grid_remove()
 
         self.description_box = ctk.CTkTextbox(
             self.detail_frame,
@@ -891,8 +946,18 @@ class ProfileViewerApp(ctk.CTk):
             else:
                 info = ""
             self.header_info_label.configure(text=info)
+        elif self.current_view == "rules":
+            self.page_title.configure(text="Правила +/-")
+            self.header_info_label.configure(text="")
+        elif self.current_view == "profile":
+            self.page_title.configure(text="Мой профиль")
+            self.header_info_label.configure(text="")
+        elif self.current_view == "corpus":
+            self.page_title.configure(text="Корпус")
+            self.header_info_label.configure(text="")
 
-        can_back = bool(self._nav_back) or self.current_view in {"list", "detail"}
+        browse_views = {"home", "list", "detail"}
+        can_back = bool(self._nav_back) or self.current_view in browse_views - {"home"}
         self.nav_back_button.configure(state="normal" if can_back else "disabled")
         self.nav_forward_button.configure(
             state="normal" if self._nav_forward else "disabled"
@@ -960,8 +1025,64 @@ class ProfileViewerApp(ctk.CTk):
         )
 
     def _hide_pages(self) -> None:
-        for frame in (self.home_frame, self.list_frame, self.detail_frame):
+        for frame in (
+            self.home_frame,
+            self.list_frame,
+            self.detail_frame,
+            self.rules_frame,
+            self.user_profile_frame,
+            self.corpus_frame,
+        ):
             frame.grid_remove()
+
+    def _set_filters_visible(self, visible: bool) -> None:
+        if visible:
+            self.filters_panel.grid()
+            self.grid_columnconfigure(1, minsize=FILTERS_WIDTH)
+            self.content.grid_configure(padx=(4, 16))
+        else:
+            self.filters_panel.grid_remove()
+            self.grid_columnconfigure(1, minsize=0)
+            self.content.grid_configure(padx=(8, 16))
+
+    def _on_nav_select(self, key: str) -> None:
+        self.sidebar_nav.set_active(key)
+        if key == "browse":
+            self._set_filters_visible(True)
+            self._show_home(record_history=False)
+            return
+        self._set_filters_visible(False)
+        self._hide_pages()
+        if key == "rules":
+            self.rules_frame.grid(row=0, column=0, sticky="nsew")
+            self._set_view("rules")
+        elif key == "profile":
+            self.user_profile_frame.grid(row=0, column=0, sticky="nsew")
+            self._set_view("profile")
+        elif key == "corpus":
+            self._refresh_corpus_view()
+            self.corpus_frame.grid(row=0, column=0, sticky="nsew")
+            self._set_view("corpus")
+
+    def _refresh_corpus_view(self) -> None:
+        from pathlib import Path
+        import json
+
+        path = Path(self.settings.base_dir) / "data" / "profile_corpus.jsonl"
+        self.corpus_box.delete("1.0", "end")
+        if not path.is_file():
+            self.corpus_box.insert("1.0", "Файл profile_corpus.jsonl не найден.")
+            return
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        self.corpus_box.insert("1.0", f"Записей в корпусе: {len(lines)}\n\n")
+        for line in lines:
+            try:
+                row = json.loads(line)
+                name = row.get("name", "?")
+                age = row.get("age", "?")
+                self.corpus_box.insert("end", f"• {name}, {age}\n")
+            except json.JSONDecodeError:
+                continue
 
     def _profile_row_items_from_summaries(
         self,
@@ -1214,10 +1335,23 @@ class ProfileViewerApp(ctk.CTk):
             font_size=14,
         )
 
+    def _render_signals_display(self, profile: ProfileView) -> None:
+        summary = format_profile_signals(profile.detected_signals)
+        if summary:
+            tw = self.signals_box._textbox
+            tw.configure(state="normal")
+            tw.delete("1.0", "end")
+            tw.insert("1.0", f"Сигналы: {summary}")
+            configure_copyable_readonly(self.signals_box)
+            self.signals_box.grid()
+        else:
+            self.signals_box.grid_remove()
+
     def _render_trash_display(self, profile: ProfileView) -> None:
         if profile.trash_score is None:
             self._set_trash_summary_text("Мусорность: ещё не рассчитана")
             self._clear_trash_tags()
+            self._render_signals_display(profile)
             return
 
         score_text = format_trash_percent(profile.trash_score)
@@ -1239,6 +1373,8 @@ class ProfileViewerApp(ctk.CTk):
             self.trash_plus_box.configure(height=panel_height)
         else:
             self._clear_trash_tags()
+
+        self._render_signals_display(profile)
 
     def _start_trash_backfill(self) -> None:
         if self._trash_backfill_running:
@@ -1311,6 +1447,12 @@ class ProfileViewerApp(ctk.CTk):
                 if self.current_index >= len(self.profile_ids):
                     self.current_index = max(0, len(self.profile_ids) - 1)
             self._render_current_profile()
+        elif self.current_view == "rules":
+            self.rules_frame.refresh()
+        elif self.current_view == "profile":
+            pass
+        elif self.current_view == "corpus":
+            self._refresh_corpus_view()
         else:
             self._show_home()
 

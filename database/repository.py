@@ -91,6 +91,8 @@ class ProfileRepository:
             conn.execute(
                 "ALTER TABLE profiles ADD COLUMN trash_analysis_version INTEGER NOT NULL DEFAULT 0"
             )
+        if "detected_signals" not in columns:
+            conn.execute("ALTER TABLE profiles ADD COLUMN detected_signals TEXT")
 
         media_columns = {
             row["name"]
@@ -367,6 +369,7 @@ class ProfileRepository:
         trash_label: str,
         trash_tags: str,
         trash_analysis_version: int,
+        detected_signals: str | None = None,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -375,7 +378,8 @@ class ProfileRepository:
                 SET trash_score = ?,
                     trash_label = ?,
                     trash_tags = ?,
-                    trash_analysis_version = ?
+                    trash_analysis_version = ?,
+                    detected_signals = COALESCE(?, detected_signals)
                 WHERE id = ?
                 """,
                 (
@@ -383,6 +387,7 @@ class ProfileRepository:
                     trash_label,
                     trash_tags,
                     trash_analysis_version,
+                    detected_signals,
                     profile_id,
                 ),
             )

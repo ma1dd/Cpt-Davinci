@@ -17,7 +17,7 @@ def run_trash_analysis_for_profile(
     compress_photos: bool = False,
 ) -> None:
     media_rows = repo.get_profile_media_rows(profile_id)
-    result, media_items = analyze_profile_trash(
+    result, media_items, signals = analyze_profile_trash(
         raw_text=raw_text,
         name=name,
         age=age,
@@ -32,6 +32,7 @@ def run_trash_analysis_for_profile(
         trash_label=result.label,
         trash_tags=result.tags_json(),
         trash_analysis_version=TRASH_ANALYSIS_VERSION,
+        detected_signals=signals.to_json(),
     )
     for index, item in enumerate(media_items):
         if index < len(media_rows):
